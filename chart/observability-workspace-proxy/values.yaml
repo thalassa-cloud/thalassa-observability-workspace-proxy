@@ -1,0 +1,105 @@
+# Shared Deployment defaults. For sidecar use, see values-sidecar.yaml and examples/sidecar-pod.yaml.
+replicaCount: 1
+
+image:
+  repository: ghcr.io/thalassa-cloud/thalassa-observability-workspace-proxy
+  pullPolicy: IfNotPresent
+  tag: ""
+
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+rbac:
+  # Permissions for TokenReview / SubjectAccessReview when inboundAuth is tokenreview or rbac.
+  create: true
+
+podAnnotations: {}
+podLabels: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+service:
+  type: ClusterIP
+  port: 8080
+  metricsPort: 9090
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# Prefer NetworkPolicy in shared mode.
+networkPolicy:
+  enabled: true
+  # Empty = allow from all namespaces in the cluster. Prefer explicit namespaces.
+  allowFromNamespaces: []
+  # Example:
+  # allowFromNamespaces:
+  #   - monitoring
+  #   - logging
+
+# TLS for the proxy listen socket (recommended for shared mode).
+tls:
+  enabled: false
+  secretName: ""
+
+proxy:
+  listenAddress: ":8080"
+  metricsAddress: ":9090"
+  # Workspace gateway base URL (no path), e.g. https://prometheus.nl-01.thalassa.cloud
+  upstream: ""
+  thalassaApiUrl: "https://api.thalassa.cloud"
+  organisationId: ""
+  serviceAccountId: ""
+  inboundAuth: "rbac"
+  authAudience: "https://observability-workspace-proxy.observability.svc"
+  rbac:
+    resourceApiGroup: ""
+    resource: "services"
+    verb: "proxy"
+    namespace: ""
+    resourceName: ""
+  upstreamTimeout: "60s"
+  maxBodyBytes: "0"
+  tokenRefreshSkew: "60s"
+
+projectedToken:
+  path: /var/run/secrets/thalassa/token
+  audience: "https://api.thalassa.cloud/"
+  expirationSeconds: 3600
+
+# Example client RoleBinding targets (shared + rbac). Bind client SAs to this role.
+clientAccess:
+  createRole: true
+  # Subjects granted permission to use the proxy (SAR resource/verb above).
+  subjects: []
+  # Example:
+  # subjects:
+  #   - kind: ServiceAccount
+  #     name: prometheus
+  #     namespace: monitoring

@@ -1,0 +1,20 @@
+{{- if .Release.IsInstall }}
+Thalassa observability workspace proxy installed.
+
+1. Bootstrap WIF for the proxy ServiceAccount (once per cluster SA):
+
+   tcloud iam workload-identity-federation bootstrap kubernetes \
+     --cluster "$CLUSTER_ID" \
+     --namespace {{ .Release.Namespace }} \
+     --service-account {{ include "observability-workspace-proxy.serviceAccountName" . }} \
+     --role <observability-role>
+
+2. Point collectors at:
+
+   http{{ if .Values.tls.enabled }}s{{ end }}://{{ include "observability-workspace-proxy.fullname" . }}.{{ .Release.Namespace }}.svc:{{ .Values.service.port }}/workspace/<obsw-id>/...
+
+3. Inbound auth mode: {{ .Values.proxy.inboundAuth }}
+{{- if eq .Values.proxy.inboundAuth "rbac" }}
+   Grant client ServiceAccounts the generated client Role/ClusterRole (see clientAccess.subjects).
+{{- end }}
+{{- end }}

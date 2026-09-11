@@ -1,0 +1,73 @@
+name: Release
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+  id-token: write
+  packages: write
+  attestations: write
+
+jobs:
+  goreleaser:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@4dc6199c7b1a012772edbd06daecab0f50c9053c # v6.1.0
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Download Syft
+        uses: anchore/sbom-action/download-syft@v0.21.0
+      - name: Download Cosign
+        uses: sigstore/cosign-installer@v4.0.0
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Run GoReleaser
+        uses: goreleaser/goreleaser-action@e435ccd777264be153ace6237001ef4d979d3a7a # v6.4.0
+        with:
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+      - name: Publish Helm charts
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          for chart in chart/*/; do
+            if [ -f "${chart}Chart.yaml" ]; then
+              CHART_NAME=$(basename "${chart}")
+              echo "Packaging chart: ${CHART_NAME}"
+              helm package "${chart}" --version "${VERSION}" --app-version "${VERSION}"
+
+              echo "Pushing chart: ${CHART_NAME}-${VERSION}.tgz"
+              PUSH_OUTPUT=$(helm push "${CHART_NAME}-${VERSION}.tgz" oci://ghcr.io/${GITHUB_REPOSITORY_OWNER}/charts 2>&1)
+              echo "${PUSH_OUTPUT}"
+
+              DIGEST=$(echo "${PUSH_OUTPUT}" | grep "Digest:" | awk '{print $2}')
+
+              if [ -n "${DIGEST}" ]; then
+                echo "Signing chart with digest: ${DIGEST}"
+                cosign sign --yes "ghcr.io/${GITHUB_REPOSITORY_OWNER}/charts/${CHART_NAME}@${DIGEST}"
+              else
+                echo "Warning: Could not extract digest, signing with tag"
+                cosign sign --yes "ghcr.io/${GITHUB_REPOSITORY_OWNER}/charts/${CHART_NAME}:${VERSION}"
+              fi
+            fi
+          done

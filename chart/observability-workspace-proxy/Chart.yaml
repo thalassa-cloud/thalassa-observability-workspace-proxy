@@ -1,0 +1,6 @@
+apiVersion: v2
+name: observability-workspace-proxy
+description: Auth proxy that exchanges Kubernetes JWTs for Thalassa Cloud tokens via WIF and forwards traffic to observability workspace gateways.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

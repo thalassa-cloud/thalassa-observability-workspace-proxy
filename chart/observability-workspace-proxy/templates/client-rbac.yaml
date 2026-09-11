@@ -1,0 +1,52 @@
+{{- if and .Values.clientAccess.createRole (eq .Values.proxy.inboundAuth "rbac") }}
+apiVersion: rbac.authorization.k8s.io/v1
+{{- if .Values.proxy.rbac.namespace }}
+kind: Role
+metadata:
+  name: {{ include "observability-workspace-proxy.fullname" . }}-client
+  namespace: {{ .Values.proxy.rbac.namespace }}
+  labels:
+    {{- include "observability-workspace-proxy.labels" . | nindent 4 }}
+{{- else }}
+kind: ClusterRole
+metadata:
+  name: {{ include "observability-workspace-proxy.fullname" . }}-client
+  labels:
+    {{- include "observability-workspace-proxy.labels" . | nindent 4 }}
+{{- end }}
+rules:
+  - apiGroups: [{{ .Values.proxy.rbac.resourceApiGroup | quote }}]
+    resources: [{{ .Values.proxy.rbac.resource | quote }}]
+    verbs: [{{ .Values.proxy.rbac.verb | quote }}]
+    {{- if .Values.proxy.rbac.resourceName }}
+    resourceNames: [{{ .Values.proxy.rbac.resourceName | quote }}]
+    {{- end }}
+{{- if .Values.clientAccess.subjects }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+{{- if .Values.proxy.rbac.namespace }}
+kind: RoleBinding
+metadata:
+  name: {{ include "observability-workspace-proxy.fullname" . }}-client
+  namespace: {{ .Values.proxy.rbac.namespace }}
+  labels:
+    {{- include "observability-workspace-proxy.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "observability-workspace-proxy.fullname" . }}-client
+{{- else }}
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "observability-workspace-proxy.fullname" . }}-client
+  labels:
+    {{- include "observability-workspace-proxy.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "observability-workspace-proxy.fullname" . }}-client
+{{- end }}
+subjects:
+  {{- toYaml .Values.clientAccess.subjects | nindent 2 }}
+{{- end }}
+{{- end }}

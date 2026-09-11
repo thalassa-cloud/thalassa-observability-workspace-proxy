@@ -1,0 +1,6 @@
+FROM gcr.io/distroless/static:nonroot
+EXPOSE 8080 9090
+
+COPY thalassa-observability-workspace-proxy /thalassa-observability-workspace-proxy
+USER nonroot:nonroot
+ENTRYPOINT ["/thalassa-observability-workspace-proxy"]

@@ -1,0 +1,89 @@
+# Example application Pod with the auth proxy as a localhost sidecar.
+# Adjust image, organisation, service account, and upstream for your environment.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: prometheus-with-thalassa-proxy
+  labels:
+    app: prometheus-with-thalassa-proxy
+spec:
+  serviceAccountName: prometheus
+  securityContext:
+    runAsNonRoot: true
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: prometheus
+      image: prom/prometheus:v3.2.1
+      resources: {}
+      args:
+        - --config.file=/etc/prometheus/prometheus.yml
+      volumeMounts:
+        - name: config
+          mountPath: /etc/prometheus
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+    - name: observability-workspace-proxy
+      image: ghcr.io/thalassa-cloud/thalassa-observability-workspace-proxy:v0.1.0
+      args:
+        - --listen-address=127.0.0.1:8080
+        - --metrics-address=127.0.0.1:9090
+        - --upstream=https://prometheus.nl-01.thalassa.cloud
+        - --thalassa-api-url=https://api.thalassa.cloud
+        - --organisation-id=org-REPLACE_ME
+        - --service-account-id=sa-REPLACE_ME
+        - --subject-token-file=/var/run/secrets/thalassa/token
+        - --inbound-auth=none
+      resources: {}
+      ports:
+        - name: proxy
+          containerPort: 8080
+      livenessProbe:
+        httpGet:
+          path: /healthz
+          port: proxy
+      readinessProbe:
+        httpGet:
+          path: /readyz
+          port: proxy
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+      volumeMounts:
+        - name: thalassa-token
+          mountPath: /var/run/secrets/thalassa
+          readOnly: true
+  volumes:
+    - name: config
+      configMap:
+        name: prometheus-config
+    - name: thalassa-token
+      projected:
+        sources:
+          - serviceAccountToken:
+              path: token
+              audience: https://api.thalassa.cloud/
+              expirationSeconds: 3600
+---
+# Corresponding Prometheus remote_write (no oauth2 client secrets):
+# remote_write:
+#   - url: http://127.0.0.1:8080/workspace/obsw-REPLACE_ME/api/v1/push
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-config
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: 30s
+    scrape_configs:
+      - job_name: self
+        static_configs:
+          - targets: ["localhost:9090"]
+    remote_write:
+      - url: http://127.0.0.1:8080/workspace/obsw-REPLACE_ME/api/v1/push

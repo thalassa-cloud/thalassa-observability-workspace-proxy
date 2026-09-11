@@ -1,0 +1,25 @@
+# Example values for a shared in-cluster proxy with inbound RBAC.
+proxy:
+  upstream: https://prometheus.nl-01.thalassa.cloud
+  organisationId: org-REPLACE_ME
+  serviceAccountId: sa-REPLACE_ME
+  inboundAuth: rbac
+  authAudience: https://observability-workspace-proxy.observability.svc
+  rbac:
+    resourceApiGroup: ""
+    resource: services
+    verb: proxy
+    namespace: observability
+    resourceName: observability-workspace-proxy
+
+networkPolicy:
+  enabled: true
+  allowFromNamespaces:
+    - monitoring
+
+clientAccess:
+  createRole: true
+  subjects:
+    - kind: ServiceAccount
+      name: prometheus
+      namespace: monitoring

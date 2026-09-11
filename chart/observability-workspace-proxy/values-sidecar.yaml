@@ -1,0 +1,22 @@
+# Profile for documenting / generating sidecar-oriented defaults.
+# Prefer embedding the container from templates/_sidecar.tpl or examples/sidecar-pod.yaml.
+replicaCount: 1
+
+proxy:
+  listenAddress: "127.0.0.1:8080"
+  metricsAddress: "127.0.0.1:9090"
+  inboundAuth: "none"
+  authAudience: ""
+
+networkPolicy:
+  enabled: false
+
+rbac:
+  create: false
+
+clientAccess:
+  createRole: false
+
+service:
+  type: ClusterIP
+  port: 8080

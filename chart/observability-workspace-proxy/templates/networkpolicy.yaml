@@ -1,0 +1,38 @@
+{{- if .Values.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "observability-workspace-proxy.fullname" . }}
+  labels:
+    {{- include "observability-workspace-proxy.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "observability-workspace-proxy.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - ports:
+        - protocol: TCP
+          port: {{ regexReplaceAll ".*:(\\d+)$" .Values.proxy.listenAddress "${1}" | int }}
+        - protocol: TCP
+          port: {{ regexReplaceAll ".*:(\\d+)$" .Values.proxy.metricsAddress "${1}" | int }}
+      {{- if .Values.networkPolicy.allowFromNamespaces }}
+      from:
+        {{- range .Values.networkPolicy.allowFromNamespaces }}
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ . | quote }}
+        {{- end }}
+      {{- end }}
+  egress:
+    - ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    - ports:
+        - protocol: TCP
+          port: 443
+{{- end }}
