@@ -90,7 +90,7 @@ proxy:
 
 projectedToken:
   path: /var/run/secrets/thalassa/token
-  audience: "https://api.thalassa.cloud/"
+  audience: "https://api.thalassa.cloud"
   expirationSeconds: 3600
 
 # Example client RoleBinding targets (shared + rbac). Bind client SAs to this role.

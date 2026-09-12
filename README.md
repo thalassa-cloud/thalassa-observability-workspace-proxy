@@ -54,7 +54,7 @@ tcloud iam workload-identity-federation bootstrap kubernetes \
   --role <observability-role>
 ```
 
-Use the resulting Thalassa service account ID for `--service-account-id`. Project the token with audience `https://api.thalassa.cloud/` (see [examples/sidecar-pod.yaml](examples/sidecar-pod.yaml)).
+Use the resulting Thalassa service account ID for `--service-account-id`. Project the token with audience `https://api.thalassa.cloud` (see [examples/sidecar-pod.yaml](examples/sidecar-pod.yaml)).
 
 ## Configuration
 
