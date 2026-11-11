@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
@@ -16,11 +17,22 @@ import (
 const (
 	grantTypeTokenExchange = "urn:ietf:params:oauth:grant-type:token-exchange"
 	subjectTokenTypeID     = "urn:ietf:params:oauth:token-type:id_token"
+
+	// refreshFailureBackoff spaces exchange attempts after a failed refresh
+	// while a cached token is still inside its real lifetime.
+	refreshFailureBackoff = 5 * time.Second
+
+	// defaultExchangeTimeout bounds a shared refresh when the caller context
+	// and the HTTP client have no deadline.
+	defaultExchangeTimeout = 15 * time.Second
 )
 
 // TokenSource provides Thalassa Cloud bearer tokens obtained via WIF exchange.
 type TokenSource interface {
 	Token(ctx context.Context) (string, error)
+	// Invalidate drops a cached bearer after upstream rejects it.
+	// A token that does not match the cache is left in place.
+	Invalidate(token string)
 }
 
 // ExchangeClient exchanges a Kubernetes subject token for a Thalassa access token.
@@ -33,9 +45,17 @@ type ExchangeClient struct {
 	HTTPClient       *http.Client
 	Now              func() time.Time
 
-	mu        sync.Mutex
-	cached    string
-	expiresAt time.Time
+	mu             sync.Mutex
+	cached         string
+	expiresAt      time.Time
+	refreshRetryAt time.Time
+	inflight       *exchangeCall
+}
+
+type exchangeCall struct {
+	done  chan struct{}
+	token string
+	err   error
 }
 
 type tokenResponse struct {
@@ -47,6 +67,8 @@ type tokenResponse struct {
 }
 
 // Token returns a cached bearer token or performs a fresh exchange.
+// Concurrent callers share one exchange. A failed refresh returns the cached
+// token while it is still before expiresAt.
 func (c *ExchangeClient) Token(ctx context.Context) (string, error) {
 	if c == nil {
 		return "", fmt.Errorf("wif exchange client is nil")
@@ -54,44 +76,172 @@ func (c *ExchangeClient) Token(ctx context.Context) (string, error) {
 	if err := c.validate(); err != nil {
 		return "", err
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
 
-	now := c.now()
 	c.mu.Lock()
-	if c.cached != "" && now.Before(c.expiresAt.Add(-c.refreshSkew())) {
-		token := c.cached
+	now := c.now()
+	if token, ok := c.reusableLocked(now); ok {
 		c.mu.Unlock()
 		return token, nil
 	}
+	if c.inflight != nil {
+		call := c.inflight
+		c.mu.Unlock()
+		return waitExchange(ctx, call)
+	}
+	call := &exchangeCall{done: make(chan struct{})}
+	c.inflight = call
 	c.mu.Unlock()
 
-	subjectToken, err := c.readSubjectToken()
-	if err != nil {
-		return "", err
-	}
-
-	accessToken, expiresIn, err := c.exchange(ctx, subjectToken)
-	if err != nil {
-		return "", err
-	}
-
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.cached = accessToken
-	if expiresIn <= 0 {
-		expiresIn = int64((time.Hour).Seconds())
-	}
-	c.expiresAt = now.Add(time.Duration(expiresIn) * time.Second)
-	return c.cached, nil
+	go func() {
+		fetchCtx, cancel := exchangeContext(ctx)
+		defer cancel()
+		token, expiresIn, err := c.fetch(fetchCtx)
+		c.complete(call, token, expiresIn, err)
+	}()
+	return waitExchange(ctx, call)
 }
 
-// HasValidCachedToken reports whether a non-expired cached token exists.
+// exchangeContext keeps the caller's deadline and ignores cancellation.
+// One disconnected client then does not abort the shared refresh.
+func exchangeContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	detached := context.WithoutCancel(ctx)
+	if deadline, ok := ctx.Deadline(); ok {
+		return context.WithDeadline(detached, deadline)
+	}
+	return context.WithTimeout(detached, defaultExchangeTimeout)
+}
+
+// Invalidate drops the cached bearer when it matches token.
+func (c *ExchangeClient) Invalidate(token string) {
+	if c == nil {
+		return
+	}
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.cached == token {
+		c.cached = ""
+		c.expiresAt = time.Time{}
+		c.refreshRetryAt = time.Time{}
+	}
+}
+
+// HasValidCachedToken reports whether a cached token is present and unexpired.
+// The refresh skew starts an early exchange and does not, by itself, drop readiness.
 func (c *ExchangeClient) HasValidCachedToken() bool {
 	if c == nil {
 		return false
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.cached != "" && c.now().Before(c.expiresAt.Add(-c.refreshSkew()))
+	_, ok := c.unexpiredLocked(c.now())
+	return ok
+}
+
+func (c *ExchangeClient) fetch(ctx context.Context) (string, int64, error) {
+	subjectToken, err := c.readSubjectToken()
+	if err != nil {
+		return "", 0, err
+	}
+	return c.exchange(ctx, subjectToken)
+}
+
+func (c *ExchangeClient) complete(call *exchangeCall, token string, expiresIn int64, fetchErr error) {
+	c.mu.Lock()
+	if c.inflight == call {
+		c.inflight = nil
+	}
+	if fetchErr == nil {
+		if err := c.storeLocked(c.now(), token, expiresIn); err != nil {
+			fetchErr = err
+		} else {
+			call.token = token
+			c.mu.Unlock()
+			close(call.done)
+			return
+		}
+	}
+	if cached, ok := c.unexpiredLocked(c.now()); ok {
+		c.refreshRetryAt = c.now().Add(refreshFailureBackoff)
+		slog.Default().Warn("token refresh failed; using cached token", "error", fetchErr.Error())
+		call.token = cached
+		c.mu.Unlock()
+		close(call.done)
+		return
+	}
+	if fetchErr == nil {
+		fetchErr = fmt.Errorf("token exchange failed")
+	}
+	call.err = fetchErr
+	c.mu.Unlock()
+	close(call.done)
+}
+
+func waitExchange(ctx context.Context, call *exchangeCall) (string, error) {
+	select {
+	case <-ctx.Done():
+		return "", fmt.Errorf("token exchange canceled: %w", ctx.Err())
+	case <-call.done:
+		if call.err != nil {
+			return "", call.err
+		}
+		if strings.TrimSpace(call.token) == "" {
+			return "", fmt.Errorf("token exchange returned empty access_token")
+		}
+		return call.token, nil
+	}
+}
+
+// reusableLocked returns the cache when it is outside the refresh skew,
+// or when a recent refresh failure still has an unexpired token.
+func (c *ExchangeClient) reusableLocked(now time.Time) (string, bool) {
+	token, ok := c.unexpiredLocked(now)
+	if !ok {
+		return "", false
+	}
+	if now.Before(c.expiresAt.Add(-c.refreshSkew())) || now.Before(c.refreshRetryAt) {
+		return token, true
+	}
+	return "", false
+}
+
+func (c *ExchangeClient) unexpiredLocked(now time.Time) (string, bool) {
+	if c.cached == "" || !now.Before(c.expiresAt) {
+		return "", false
+	}
+	return c.cached, true
+}
+
+func (c *ExchangeClient) storeLocked(now time.Time, token string, expiresIn int64) error {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return fmt.Errorf("token exchange returned empty access_token")
+	}
+	deadline, err := expiryDeadline(now, expiresIn)
+	if err != nil {
+		return err
+	}
+	c.cached = token
+	c.expiresAt = deadline
+	c.refreshRetryAt = time.Time{}
+	return nil
+}
+
+func expiryDeadline(now time.Time, expiresIn int64) (time.Time, error) {
+	if expiresIn <= 0 {
+		return time.Time{}, fmt.Errorf("token exchange returned non-positive expires_in")
+	}
+	const maxSeconds = int64(time.Duration(1<<63-1) / time.Second)
+	if expiresIn > maxSeconds {
+		return time.Time{}, fmt.Errorf("token exchange expires_in out of range")
+	}
+	return now.Add(time.Duration(expiresIn) * time.Second), nil
 }
 
 func (c *ExchangeClient) validate() error {
