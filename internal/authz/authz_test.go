@@ -2,6 +2,7 @@ package authz
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -60,11 +61,25 @@ func TestMiddleware(t *testing.T) {
 			wantStatus: http.StatusNoContent,
 		},
 		{
-			name:       "rbac denies when reviewer fails",
+			name:       "rbac deny",
+			mode:       ModeRBAC,
+			reviewer:   stubReviewer{err: &StatusError{Status: http.StatusForbidden, Err: errors.New("rbac denied")}},
+			authHeader: "Bearer good-token",
+			wantStatus: http.StatusForbidden,
+		},
+		{
+			name:       "unauthenticated token",
+			mode:       ModeTokenReview,
+			reviewer:   stubReviewer{err: &StatusError{Status: http.StatusUnauthorized, Err: errors.New("token is not authenticated")}},
+			authHeader: "Bearer good-token",
+			wantStatus: http.StatusUnauthorized,
+		},
+		{
+			name:       "backend failure is retryable",
 			mode:       ModeRBAC,
 			reviewer:   stubReviewer{err: context.Canceled},
 			authHeader: "Bearer good-token",
-			wantStatus: http.StatusForbidden,
+			wantStatus: http.StatusServiceUnavailable,
 		},
 		{
 			name:       "nil reviewer rejects",
@@ -91,11 +106,14 @@ func TestMiddleware(t *testing.T) {
 
 func TestK8sReviewerTokenReviewAndRBAC(t *testing.T) {
 	tests := []struct {
-		name    string
-		mode    string
-		authOK  bool
-		allowed bool
-		wantErr string
+		name           string
+		mode           string
+		authOK         bool
+		allowed        bool
+		tokenReviewErr error
+		subjectErr     error
+		wantErr        string
+		wantStatus     int
 	}{
 		{
 			name:   "tokenreview success",
@@ -103,10 +121,18 @@ func TestK8sReviewerTokenReviewAndRBAC(t *testing.T) {
 			authOK: true,
 		},
 		{
-			name:    "tokenreview unauthenticated",
-			mode:    ModeTokenReview,
-			authOK:  false,
-			wantErr: "token is not authenticated",
+			name:       "tokenreview unauthenticated",
+			mode:       ModeTokenReview,
+			authOK:     false,
+			wantErr:    "token is not authenticated",
+			wantStatus: http.StatusUnauthorized,
+		},
+		{
+			name:           "tokenreview api error",
+			mode:           ModeTokenReview,
+			tokenReviewErr: errors.New("apiserver timeout"),
+			wantErr:        "token review failed",
+			wantStatus:     http.StatusServiceUnavailable,
 		},
 		{
 			name:    "rbac allowed",
@@ -115,11 +141,20 @@ func TestK8sReviewerTokenReviewAndRBAC(t *testing.T) {
 			allowed: true,
 		},
 		{
-			name:    "rbac denied",
-			mode:    ModeRBAC,
-			authOK:  true,
-			allowed: false,
-			wantErr: "rbac denied",
+			name:       "rbac denied",
+			mode:       ModeRBAC,
+			authOK:     true,
+			allowed:    false,
+			wantErr:    "rbac denied",
+			wantStatus: http.StatusForbidden,
+		},
+		{
+			name:       "subject access review api error",
+			mode:       ModeRBAC,
+			authOK:     true,
+			subjectErr: errors.New("apiserver timeout"),
+			wantErr:    "subject access review failed",
+			wantStatus: http.StatusServiceUnavailable,
 		},
 	}
 
@@ -127,6 +162,9 @@ func TestK8sReviewerTokenReviewAndRBAC(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			client := fake.NewSimpleClientset()
 			client.PrependReactor("create", "tokenreviews", func(action k8stesting.Action) (bool, runtime.Object, error) {
+				if tt.tokenReviewErr != nil {
+					return true, nil, tt.tokenReviewErr
+				}
 				return true, &authv1.TokenReview{
 					Status: authv1.TokenReviewStatus{
 						Authenticated: tt.authOK,
@@ -139,6 +177,9 @@ func TestK8sReviewerTokenReviewAndRBAC(t *testing.T) {
 				}, nil
 			})
 			client.PrependReactor("create", "subjectaccessreviews", func(action k8stesting.Action) (bool, runtime.Object, error) {
+				if tt.subjectErr != nil {
+					return true, nil, tt.subjectErr
+				}
 				return true, &authzv1.SubjectAccessReview{
 					Status: authzv1.SubjectAccessReviewStatus{
 						Allowed: tt.allowed,
@@ -165,6 +206,9 @@ func TestK8sReviewerTokenReviewAndRBAC(t *testing.T) {
 			}
 			require.Error(t, err)
 			require.Contains(t, err.Error(), tt.wantErr)
+			var se *StatusError
+			require.ErrorAs(t, err, &se)
+			require.Equal(t, tt.wantStatus, se.Status)
 		})
 	}
 }

@@ -2,6 +2,7 @@ package authz
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -19,8 +20,37 @@ const (
 )
 
 // Reviewer validates Kubernetes bearer tokens and optional RBAC.
+//
+// Authorize returns a *StatusError so the middleware can choose the HTTP status.
+// A plain error is treated as a backend failure (HTTP 503).
 type Reviewer interface {
 	Authorize(ctx context.Context, token string) error
+}
+
+// StatusError is an authorization result with a fixed HTTP status.
+// The message is for logs. The middleware writes a generic response body.
+type StatusError struct {
+	Status int
+	Err    error
+}
+
+// Error returns the underlying message.
+func (e *StatusError) Error() string {
+	if e == nil {
+		return "authorization error"
+	}
+	if e.Err != nil {
+		return e.Err.Error()
+	}
+	return http.StatusText(e.Status)
+}
+
+// Unwrap returns the cause.
+func (e *StatusError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
 }
 
 // Config configures inbound authorization behavior.
@@ -56,7 +86,7 @@ func (m *Middleware) Wrap(next http.Handler) http.Handler {
 			return
 		}
 		if err := m.Reviewer.Authorize(r.Context(), token); err != nil {
-			http.Error(w, "forbidden", http.StatusForbidden)
+			writeAuthzError(w, err)
 			return
 		}
 		next.ServeHTTP(w, r)
@@ -72,10 +102,10 @@ type K8sReviewer struct {
 // Authorize validates the token and, in rbac mode, checks SAR.
 func (k *K8sReviewer) Authorize(ctx context.Context, token string) error {
 	if k == nil || k.Client == nil {
-		return fmt.Errorf("kubernetes client is required")
+		return statusError(http.StatusServiceUnavailable, errors.New("kubernetes client is required"))
 	}
 	if strings.TrimSpace(token) == "" {
-		return fmt.Errorf("token is required")
+		return statusError(http.StatusUnauthorized, errors.New("token is required"))
 	}
 
 	tr := &authv1.TokenReview{
@@ -89,10 +119,10 @@ func (k *K8sReviewer) Authorize(ctx context.Context, token string) error {
 
 	res, err := k.Client.AuthenticationV1().TokenReviews().Create(ctx, tr, metav1.CreateOptions{})
 	if err != nil {
-		return fmt.Errorf("token review failed: %w", err)
+		return statusError(http.StatusServiceUnavailable, fmt.Errorf("token review failed: %w", err))
 	}
 	if !res.Status.Authenticated {
-		return fmt.Errorf("token is not authenticated")
+		return statusError(http.StatusUnauthorized, errors.New("token is not authenticated"))
 	}
 
 	if k.Config.Mode != ModeRBAC {
@@ -116,16 +146,43 @@ func (k *K8sReviewer) Authorize(ctx context.Context, token string) error {
 	}
 	sarRes, err := k.Client.AuthorizationV1().SubjectAccessReviews().Create(ctx, sar, metav1.CreateOptions{})
 	if err != nil {
-		return fmt.Errorf("subject access review failed: %w", err)
+		return statusError(http.StatusServiceUnavailable, fmt.Errorf("subject access review failed: %w", err))
 	}
 	if !sarRes.Status.Allowed {
 		reason := sarRes.Status.Reason
 		if reason == "" {
 			reason = "access denied"
 		}
-		return fmt.Errorf("rbac denied: %s", reason)
+		return statusError(http.StatusForbidden, fmt.Errorf("rbac denied: %s", reason))
 	}
 	return nil
+}
+
+func writeAuthzError(w http.ResponseWriter, err error) {
+	status := http.StatusServiceUnavailable
+	var se *StatusError
+	if errors.As(err, &se) {
+		switch se.Status {
+		case http.StatusUnauthorized, http.StatusForbidden, http.StatusServiceUnavailable:
+			status = se.Status
+		}
+	}
+	http.Error(w, authzBody(status), status)
+}
+
+func authzBody(status int) string {
+	switch status {
+	case http.StatusUnauthorized:
+		return "unauthorized"
+	case http.StatusForbidden:
+		return "forbidden"
+	default:
+		return "authorization unavailable"
+	}
+}
+
+func statusError(status int, err error) error {
+	return &StatusError{Status: status, Err: err}
 }
 
 func bearerToken(header string) (string, bool) {
