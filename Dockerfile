@@ -1,5 +1,5 @@
 # Local/dev image. Releases use Dockerfile.goreleaser via GoReleaser.
-FROM golang:1.24-alpine AS builder
+FROM golang:1.27-alpine AS builder
 WORKDIR /src
 
 RUN apk add --no-cache ca-certificates git
