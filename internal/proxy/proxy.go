@@ -120,15 +120,14 @@ func bufferRequestBody(w http.ResponseWriter, r *http.Request, maxBytes int64) e
 	if r.Body == nil || r.Body == http.NoBody {
 		return nil
 	}
-	reader := io.ReadCloser(r.Body)
+	reader := r.Body
 	if maxBytes > 0 {
 		reader = http.MaxBytesReader(w, r.Body, maxBytes)
 	}
 	data, err := io.ReadAll(reader)
 	closeErr := reader.Close()
 	if err != nil {
-		var maxErr *http.MaxBytesError
-		if errors.As(err, &maxErr) {
+		if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
 			http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
 			return err
 		}
