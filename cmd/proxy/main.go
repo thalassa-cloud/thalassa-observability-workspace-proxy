@@ -61,6 +61,8 @@ func run() int {
 	} else {
 		logger.Info("initial token exchange succeeded")
 	}
+	// Refresh before the skew window even when the Service has no traffic.
+	go tokenClient.RunRefreshLoop(ctx)
 
 	proxyHandler, err := proxy.New(cfg.Upstream, tokenClient, cfg.UpstreamTimeout, cfg.MaxBodyBytes, logger)
 	if err != nil {

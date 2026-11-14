@@ -26,8 +26,9 @@ func (h *Handler) Live(w http.ResponseWriter, _ *http.Request) {
 	_, _ = w.Write([]byte("ok"))
 }
 
-// Ready succeeds only when a valid cached Thalassa token is present.
-// Callers should warm the token on startup so readiness reflects auth readiness.
+// Ready succeeds when a cached Thalassa token is present and unexpired.
+// The refresh skew does not fail readiness. Warm the token on startup and
+// refresh it in the background so an idle Service stays Ready.
 func (h *Handler) Ready(w http.ResponseWriter, _ *http.Request) {
 	if h == nil || h.Tokens == nil || !h.Tokens.HasValidCachedToken() {
 		http.Error(w, "token not ready", http.StatusServiceUnavailable)

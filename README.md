@@ -81,7 +81,7 @@ Security behaviour:
 - Missing token file, exchange failure, or inbound auth failure fails closed (401/403/502).
 - Upstream is a single configured host (not an open proxy).
 
-Probes: `GET /healthz` (liveness), `GET /readyz` (ready when a cached Thalassa token is available). Metrics: `GET /metrics` on `--metrics-address`.
+Probes: `GET /healthz` (liveness), `GET /readyz` (ready when a cached Thalassa token is unexpired). The proxy refreshes the token in the background before `--token-refresh-skew`, so an idle Service stays Ready. Metrics: `GET /metrics` on `--metrics-address`.
 
 ## Helm (shared proxy)
 

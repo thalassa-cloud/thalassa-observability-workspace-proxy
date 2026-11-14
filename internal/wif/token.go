@@ -144,6 +144,50 @@ func (c *ExchangeClient) HasValidCachedToken() bool {
 	return ok
 }
 
+// RunRefreshLoop refreshes the Thalassa token before the refresh skew until ctx ends.
+// It does not depend on proxied traffic, so readiness stays up for an idle Service.
+func (c *ExchangeClient) RunRefreshLoop(ctx context.Context) {
+	if c == nil {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	for {
+		wait := c.nextRefreshDelay()
+		timer := time.NewTimer(wait)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+		if _, err := c.Token(ctx); err != nil && !c.HasValidCachedToken() {
+			slog.Default().Warn("background token refresh failed", "error", err.Error())
+		}
+	}
+}
+
+// nextRefreshDelay returns how long to wait before the next background exchange.
+func (c *ExchangeClient) nextRefreshDelay() time.Duration {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	now := c.now()
+	if now.Before(c.refreshRetryAt) {
+		return c.refreshRetryAt.Sub(now)
+	}
+	if c.cached == "" || !now.Before(c.expiresAt) {
+		return refreshFailureBackoff
+	}
+	refreshAt := c.expiresAt.Add(-c.refreshSkew())
+	if now.Before(refreshAt) {
+		return refreshAt.Sub(now)
+	}
+	// Already inside the skew window. Retry soon without a tight loop.
+	return refreshFailureBackoff
+}
+
 func (c *ExchangeClient) fetch(ctx context.Context) (string, int64, error) {
 	subjectToken, err := c.readSubjectToken()
 	if err != nil {

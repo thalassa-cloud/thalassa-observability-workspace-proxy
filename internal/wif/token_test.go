@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -341,4 +342,107 @@ func TestExchangeClientMissingFile(t *testing.T) {
 	_, err := client.Token(context.Background())
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "read subject token file")
+}
+
+func TestNextRefreshDelay(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	client := &ExchangeClient{
+		RefreshSkew: time.Minute,
+		Now:         func() time.Time { return now },
+	}
+
+	require.Equal(t, refreshFailureBackoff, client.nextRefreshDelay())
+
+	client.mu.Lock()
+	client.cached = "tok-1"
+	client.expiresAt = now.Add(10 * time.Minute)
+	client.mu.Unlock()
+	require.Equal(t, 9*time.Minute, client.nextRefreshDelay())
+
+	now = now.Add(9*time.Minute + time.Second)
+	require.True(t, client.HasValidCachedToken())
+	require.Equal(t, refreshFailureBackoff, client.nextRefreshDelay())
+
+	client.mu.Lock()
+	client.refreshRetryAt = now.Add(3 * time.Second)
+	client.mu.Unlock()
+	require.Equal(t, 3*time.Second, client.nextRefreshDelay())
+}
+
+func TestExchangeClientRefreshLoopRefreshesWithoutTraffic(t *testing.T) {
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := calls.Add(1)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"access_token": "tok-" + strconv.FormatInt(int64(n), 10),
+			"expires_in":   2,
+		})
+	}))
+	t.Cleanup(srv.Close)
+
+	tokenFile := filepath.Join(t.TempDir(), "token")
+	require.NoError(t, os.WriteFile(tokenFile, []byte("k8s-jwt"), 0o600))
+
+	client := &ExchangeClient{
+		APIURL:           srv.URL,
+		OrganisationID:   "org-1",
+		ServiceAccountID: "sa-1",
+		SubjectTokenFile: tokenFile,
+		RefreshSkew:      time.Second,
+		HTTPClient:       srv.Client(),
+	}
+
+	tok, err := client.Token(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, "tok-1", tok)
+	require.True(t, client.HasValidCachedToken())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go client.RunRefreshLoop(ctx)
+
+	require.Eventually(t, func() bool {
+		return calls.Load() >= 2 && client.HasValidCachedToken()
+	}, 5*time.Second, 50*time.Millisecond)
+
+	tok, err = client.Token(context.Background())
+	require.NoError(t, err)
+	require.NotEqual(t, "tok-1", tok)
+	require.True(t, client.HasValidCachedToken())
+}
+
+func TestReadyStaysTrueInsideSkewWithoutTraffic(t *testing.T) {
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"access_token": "tok-1",
+			"expires_in":   120,
+		})
+	}))
+	t.Cleanup(srv.Close)
+
+	tokenFile := filepath.Join(t.TempDir(), "token")
+	require.NoError(t, os.WriteFile(tokenFile, []byte("k8s-jwt"), 0o600))
+
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	client := &ExchangeClient{
+		APIURL:           srv.URL,
+		OrganisationID:   "org-1",
+		ServiceAccountID: "sa-1",
+		SubjectTokenFile: tokenFile,
+		RefreshSkew:      time.Minute,
+		HTTPClient:       srv.Client(),
+		Now:              func() time.Time { return now },
+	}
+
+	_, err := client.Token(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, int32(1), calls.Load())
+
+	// Enter the refresh skew without another Token() call. Readiness must stay up.
+	now = now.Add(90 * time.Second)
+	require.True(t, client.HasValidCachedToken())
+	require.Equal(t, refreshFailureBackoff, client.nextRefreshDelay())
+	require.Equal(t, int32(1), calls.Load())
 }
